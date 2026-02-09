@@ -30,27 +30,29 @@ uses
   Classes;
 
 const
-  MQTT_PROTOCOL   = 'MQIsdp';
-  MQTT_VERSION    = 3;
+  MQTT_PROTOCOL     = 'MQIsdp';
+  MQTT_VERSION      = 3;
 
-  DefRetryTime  = 60;   // 6 seconds
-  DefMaxRetries = 8;
+  DefRetryTime      = 60;   // 6 seconds
+  DefMaxRetries     = 8;
 
-  rsHdr           = 0;
-  rsLen           = 1;
-  rsVarHdr        = 2;
-  rsPayload       = 3;
+  rsHdr             = 0;
+  rsLen             = 1;
+  rsVarHdr          = 2;
+  rsPayload         = 3;
 
-  frKEEPALIVE     = 0;    // keep alive exceeded
-  frMAXRETRIES    = 1;
+  frKEEPALIVE       = -2;    // keep alive exceeded
+  frMAXRETRIES      = -1;
+  frUNKNOWNHOST     = 0;
+  // Errors > 0 are provided by network layer.
 
-  rcACCEPTED      = 0;    // Connection Accepted
-  rcPROTOCOL      = 1;    // Connection Refused: unacceptable protocol version
-  rcIDENTIFIER    = 2;    // Connection Refused: identifier rejected
-  rcSERVER        = 3;    // Connection Refused: server unavailable
-  rcUSER          = 4;    // Connection Refused: bad user name or password
-  rcAUTHORISED    = 5;    // Connection Refused: not authorised
-                          // 6-255 Reserved for future use
+  rcACCEPTED        = 0;    // Connection Accepted
+  rcPROTOCOL        = 1;    // Connection Refused: unacceptable protocol version
+  rcIDENTIFIER      = 2;    // Connection Refused: identifier rejected
+  rcSERVER          = 3;    // Connection Refused: server unavailable
+  rcUSER            = 4;    // Connection Refused: bad user name or password
+  rcAUTHORISED      = 5;    // Connection Refused: not authorised
+                            // 6-255 Reserved for future use
   ny : array [boolean] of string = ('NO', 'YES');
 
 type
@@ -239,7 +241,7 @@ const
 
 function CodeNames (aCode : byte) : string;
 function ExtractFileNameOnly (FileName : string) : string;
-function FailureNames (aCode : byte) : string;
+function FailureNames (aCode : Integer) : string;
 procedure DebugStr (aStr : string);
 
 implementation
@@ -265,18 +267,21 @@ begin
   end;
 end;
 
-function FailureNames (aCode : byte) : string;
+function FailureNames (aCode : Integer) : string;
 begin
   case (aCode) of
-    frKEEPALIVE  : Result := 'KEEP ALIVE TIMEOUT';
-    frMAXRETRIES : Result := 'MAX RETRIES EXCEEDED';
-    else           Result := 'RESERVED ' + IntToStr (aCode);
+    frKEEPALIVE   : Result := 'KEEP ALIVE TIMEOUT';
+    frMAXRETRIES  : Result := 'MAX RETRIES EXCEEDED';
+    frUNKNOWNHOST : Result := 'UNKNOWN HOST';
+    else            Result := SysErrorMessage(aCode);
   end;
+
+  if Result = '' then Result := 'UNKNOWN ERROR (' + IntToStr(aCode) + ')';
 end;
 
 procedure DebugStr (aStr : string);
 begin
-  OutputDebugString (PChar (aStr));
+  OutputDebugString (PChar(aStr));
 end;
 
 procedure AddByte (aStream : TStream; aByte: Byte);
@@ -416,13 +421,22 @@ end;
 
 procedure TMQTTParser.Parse (aStr: AnsiString);
 var
+  len     : integer;
   aStream : TMemoryStream;
 begin
-  aStream := TMemoryStream.Create;
-  aStream.Write (aStr[1], length (aStr));
-  aStream.Seek (0, soFromBeginning);
-  Parse (aStream);
-  aStream.Free;
+  // rise Range Check Error if aStr is empty string! Change this procedure to checking if Length(aStr)>0.
+  len := length(aStr);
+
+  if (len>0) then begin
+    aStream := TMemoryStream.Create;
+    try
+      aStream.Write (aStr[1], len);
+      aStream.Seek (0, soFromBeginning);
+      Parse (aStream);
+    finally
+      aStream.Free;
+    end;
+  end;
 end;
 
 procedure TMQTTParser.Reset;
@@ -657,7 +671,7 @@ begin
     begin
       x := x or $04;
       if WillRetain then
-        x := x or $10;
+        x := x or $20; // Fixed the bit position of the "WillRetain" flag in SendConnect
       x := x or (ord (WillQos) shl 3);
     end;
   if Clean then

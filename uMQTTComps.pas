@@ -1,13 +1,10 @@
 unit uMQTTComps;
 
 interface
+
 uses
-  Classes, uMQTT, OverbyteIcsWndControl, OverbyteIcsWSocket, OverbyteIcsWSocketS, Windows, Messages;
+  Classes, uMQTT, Math, Windows, Messages, SysUtils, IniFiles, OverbyteIcsWndControl, OverbyteIcsWSocket, OverbyteIcsWSocketS;
 
-
-(*  Todo
-    Finish Retain
-*)
 (*    Web Sites
 http://www.alphaworks.ibm.com/tech/rsmb
 http://www.mqtt.org
@@ -205,7 +202,8 @@ type
     procedure SetPassword(const Value: UTF8String);
     procedure SetUsername(const Value: UTF8String);
   public
-    Link : TWSocket;
+    Link : TSslWSocket; //Link : TWSocket;
+
     Parser : TMQTTParser;
     InFlight : TMQTTPacketStore;
     Releasables : TMQTTMessageStore;
@@ -222,6 +220,8 @@ type
     procedure SetWill (aTopic, aMessage : UTF8String; aQos : TMQTTQOSType; aRetain : Boolean = false);
     procedure Mon (aStr : string);
     procedure Activate (Enable : Boolean);
+    procedure EnableTLS(const ACAFile, ACertFile, AKeyFile: string; const VerifyPeer: Boolean = False);
+    function StartsWithPemHeader(const Path, Header: AnsiString): Boolean;
     constructor Create (anOwner : TComponent); override;
     destructor Destroy; override;
   published
@@ -267,8 +267,8 @@ type
     FOnStoreSession: TMQTTSessionEvent;
     FOnRestoreSession: TMQTTSessionEvent;
     FOnDeleteSession: TMQTTSessionEvent;
-//    FOnRetain: TMQTTRetainEvent;
-//    FOnGetRetained: TMQTTRetainedEvent;
+    FOnRetain: TMQTTRetainEvent;
+    FOnGetRetained: TMQTTRetainedEvent;
     procedure TimerProc (var aMsg : TMessage);
     procedure DoMon (Sender: TObject; aStr : string);
     // broker events
@@ -331,8 +331,8 @@ type
     property OnStoreSession : TMQTTSessionEvent read FOnStoreSession write FOnStoreSession;
     property OnRestoreSession : TMQTTSessionEvent read FOnRestoreSession write FOnRestoreSession;
     property OnDeleteSession : TMQTTSessionEvent read FOnDeleteSession write FOnDeleteSession;
-//    property OnRetain : TMQTTRetainEvent read FOnRetain write FOnRetain;
-//    property OnGetRetained : TMQTTRetainedEvent read FOnGetRetained write FOnGetRetained;
+    property OnRetain : TMQTTRetainEvent read FOnRetain write FOnRetain;
+    property OnGetRetained : TMQTTRetainedEvent read FOnGetRetained write FOnGetRetained;
     property OnBrokerOnline : TNotifyEvent read FOnBrokerOnline write FOnBrokerOnline;
     property OnBrokerOffline : TMQTTDisconnectEvent read FOnBrokerOffline write FOnBrokerOffline;
     property OnBrokerEnableChange : TNotifyEvent read FOnBrokerEnableChange write FOnBrokerEnableChange;
@@ -351,7 +351,7 @@ function IsSubscribed (aSubscription, aTopic : UTF8String) : boolean;
 implementation
 
 uses
-  SysUtils, IniFiles;
+ Types;
 
 procedure Register;
 begin
@@ -1369,10 +1369,11 @@ begin
   Parser.KeepAlive := 10;
   Timers := AllocateHWnd (TimerProc);
   InFlight := TMQTTPacketStore.Create;
-  Link := TWSocket.Create (Self);
-  Link.OnDataAvailable := LinkData;
+  Link := TSslWSocket.Create (Self); //Link := TWSocket.Create (Self);
+
+  Link.OnDataAvailable    := LinkData;
   Link.OnSessionConnected := LinkConnected;
-  Link.OnSessionClosed := LinkClosed;
+  Link.OnSessionClosed    := LinkClosed;
 end;
 
 destructor TMQTTClient.Destroy;
@@ -1540,6 +1541,32 @@ begin
   Parser.SetWill (aTopic, aMessage, aQos, aRetain);
 end;
 
+function TMQTTClient.StartsWithPemHeader(const Path,
+  Header: AnsiString): Boolean;
+var
+  FS: TFileStream;
+  Buf: AnsiString;
+  L: Integer;
+begin
+  Result := False;
+  if not FileExists(Path) then Exit;
+  FS := TFileStream.Create(Path, fmOpenRead or fmShareDenyNone);
+  try
+    L := Min(2048, FS.Size);
+    SetLength(Buf, L);
+    if L > 0 then begin
+      FS.ReadBuffer(PAnsiChar(Buf)^, L);
+      // Remove possível BOM UTF-8
+      if (Length(Buf) >= 3) and (Buf[1] = #$EF) and (Buf[2] = #$BB) and (Buf[3] = #$BF) then
+        Buf := Copy(Buf, 4, MaxInt);
+      Result := Pos(Header, Buf) > 0;
+    end;
+  finally
+    FS.Free;
+  end;
+
+end;
+
 procedure TMQTTClient.Subscribe (Topics: TStringList);
 var
   j : integer;
@@ -1620,6 +1647,62 @@ begin
   Result := FEnable;
 end;
 
+procedure TMQTTClient.EnableTLS(const ACAFile, ACertFile, AKeyFile: string; const VerifyPeer: Boolean = False);
+  function Dequote(const S: string): string;
+  var
+    L: Integer;
+  begin
+    Result := Trim(S);
+
+    while True do begin
+      L := Length(Result);
+
+      if L < 2 then Break;
+      if ((Result[1] = '"')  and (Result[L] = '"')) or ((Result[1] = '''') and (Result[L] = '''')) then Result := Copy(Result, 2, L - 2) else Break;
+    end;
+  end;
+var
+  CA, Cert, Key: string;
+begin
+  Link.SslEnable := True;
+  if Link.SslContext = nil then Link.SslContext := TSslContext.Create(nil);
+
+  CA   := Dequote(ACAFile);
+  Cert := Dequote(ACertFile);
+  Key  := Dequote(AKeyFile);
+
+  with Link.SslContext do begin
+    SslVerifyPeer := VerifyPeer;
+
+    {$IFNDEF VER180}
+      {$IF Declared(SslVerifyCert)}SslVerifyCert := VerifyPeer;{$IFEND}
+      {$IF Declared(SslCliSecurity) and Declared(sslCliSecTLS12)}SslCliSecurity := sslCliSecTLS12;{$IFEND}
+    {$ENDIF}
+
+    SslMinVersion := sslVerTLS1_1;
+    SslMaxVersion := sslVerTLS1_3;
+    SslOptions    := SslOptions + [sslOpt_NO_SSLv2];
+    SslOptions    := SslOptions + [sslOpt_NO_SSLv3];
+    SslOptions    := SslOptions + [sslOpt_NO_TLSv1];
+    SslOptions    := SslOptions + [sslOpt_NO_TLSv1_1];
+
+    if CA <> '' then SslCAFile := CA;
+
+    // Valida PEMs para evitar o erro “Error on reading certificate lines”
+    if Cert <> '' then begin
+      if not StartsWithPemHeader(Cert, '-----BEGIN CERTIFICATE-----') then raise ESslContextException.Create('Arquivo de certificado inválido ou não-PEM: ' + Cert);
+      SslCertFile := Cert;
+    end;
+
+    if Key <> '' then begin
+      if not (StartsWithPemHeader(Key, '-----BEGIN PRIVATE KEY-----') or StartsWithPemHeader(Key, '-----BEGIN RSA PRIVATE KEY-----')) then raise ESslContextException.Create('Arquivo de chave inválido ou não-PEM: ' + Key);
+      SslPrivKeyFile := Key;
+    end;
+  end;
+
+  Link.SslServerName := Host; // SNI
+end;
+
 function TMQTTClient.GetClean: Boolean;
 begin
   Result := Parser.Clean;
@@ -1683,6 +1766,7 @@ end;
 procedure TMQTTClient.LinkConnected (Sender: TObject; ErrCode: Word);
 var
   aClientID : UTF8String;
+  WillClose : Boolean;
 
   function TimeString : UTF8string;
   begin
@@ -1691,8 +1775,9 @@ var
   end;
 
 begin
-  if ErrCode = 0 then
-    begin
+  WillClose := False;
+
+  if ErrCode = 0 then begin
       FGraceful := false;    // still haven't connected but expect to
       Parser.Reset;
    //   mon ('Time String : ' + Timestring);
@@ -1712,7 +1797,10 @@ begin
         Parser.SendBrokerConnect (aClientID, Parser.UserName, Parser.Password, KeepAlive, Parser.Clean)
       else
         Parser.SendConnect (aClientID, Parser.UserName, Parser.Password, KeepAlive, Parser.Clean);
-    end;
+  end else begin
+      if Assigned(FOnFailure) then FOnFailure(Sender, ErrCode, WillClose);
+      FEnable := not WillClose;
+  end;
 end;
 
 procedure TMQTTClient.LinkData (Sender: TObject; ErrCode: Word);
@@ -1793,12 +1881,14 @@ begin
       case aMsg.WParam of
         1 : begin
               Mon ('Connecting to ' + Host + ' on Port ' + IntToStr (Port));
-              Link.Addr := Host;
-              Link.Port := IntToStr (Port);
+              Link.Addr  := Host;
+              Link.Port  := IntToStr (Port);
               Link.Proto := 'tcp';
               try
                 Link.Connect;
               except
+                if Assigned(FOnFailure) then FOnFailure(Self, frUNKNOWNHOST, WillClose);
+                if WillClose            then Link.CloseDelayed;
               end;
             end;
         2 : Ping;
