@@ -13,7 +13,6 @@ type
   PDataRec = ^TDataRec;
 
   TBrokerForm = class(TForm)
-    MonTree: TVirtualStringTree;
     IPTxt: TEdit;
     PortTxt: TEdit;
     Label1: TLabel;
