@@ -27,7 +27,12 @@ package MQTTComponents;
 requires
   rtl,
   vcl,
-  OverbyteIcsDXeRun;
+  {$IFDEF VER180}
+  OverbyteIcsD2007Run // Delphi 2007
+  {$ELSE}
+  OverbyteIcsDXeRun // Delphi XE e acima
+  {$ENDIF}
+  ;
 
 contains
   uMQTTComps in 'uMQTTComps.pas',
