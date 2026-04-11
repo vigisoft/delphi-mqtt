@@ -30,7 +30,7 @@ package MQTTComponents_10;
 requires
   rtl,
   vcl,
-  OverbyteIcsD104Run;
+  OverbyteIcsD103Run;
 
 contains
   uMQTTComps in 'uMQTTComps.pas',
