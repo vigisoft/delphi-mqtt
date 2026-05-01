@@ -224,6 +224,8 @@ type
     function StartsWithPemHeader(const Path, Header: AnsiString): Boolean;
     constructor Create (anOwner : TComponent); override;
     destructor Destroy; override;
+
+    function GenerateClientID(const APrefix: string = ''; const ASuffix: string = ''): UTF8String;
   published
     property ClientID : UTF8String read GetClientID write SetClientID;
     property KeepAlive : Word read GetKeepAlive write SetKeepAlive;
@@ -1701,6 +1703,26 @@ begin
   end;
 
   Link.SslServerName := Host; // SNI
+end;
+
+function TMQTTClient.GenerateClientID(const APrefix, ASuffix: string): UTF8String;
+const
+  CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  LEN   = 16;
+var
+  LClientIdRandom : string;
+  LCount          : integer;
+begin
+  LClientIdRandom := EmptyStr;
+
+  Randomize;
+
+  SetLength(LClientIdRandom,LEN);
+  for LCount := 1 to LEN do LClientIdRandom[LCount] := CHARS[Random(Length(CHARS)) + 1];
+
+  SetClientId(UTF8String(APrefix + LClientIdRandom + ASuffix));
+
+  Result := GetClientID;
 end;
 
 function TMQTTClient.GetClean: Boolean;
