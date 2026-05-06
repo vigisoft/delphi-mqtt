@@ -353,7 +353,7 @@ function IsSubscribed (aSubscription, aTopic : UTF8String) : boolean;
 implementation
 
 uses
- Types;
+ StrUtils, Types;
 
 procedure Register;
 begin
@@ -1720,7 +1720,7 @@ begin
   SetLength(LClientIdRandom,LEN);
   for LCount := 1 to LEN do LClientIdRandom[LCount] := CHARS[Random(Length(CHARS)) + 1];
 
-  SetClientId(UTF8String(APrefix + LClientIdRandom + ASuffix));
+  SetClientId(UTF8String(IfThen(not APrefix.Trim.IsEmpty,APrefix + '_') + LClientIdRandom + '-' + IntToHex(GetTickCount, 8) + IfThen(not ASuffix.Trim.IsEmpty,'_' + ASuffix)));
 
   Result := GetClientID;
 end;
