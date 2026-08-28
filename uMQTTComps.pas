@@ -71,10 +71,11 @@ type
   end;
 
   TMQTTSession = class
-    ClientID    : UTF8String;
-    Stamp       : TDateTime;
-    InFlight    : TMQTTPacketStore;
-    Releasables : TMQTTMessageStore;
+    ClientID      : UTF8String;
+    Stamp         : TDateTime;
+    Subscriptions : TStringList;
+    InFlight      : TMQTTPacketStore;
+    Releasables   : TMQTTMessageStore;
 
     constructor Create;
     destructor  Destroy; override;
@@ -197,6 +198,7 @@ type
     FLocalBounce         : Boolean;
     FAutoSubscribe       : Boolean;
     FBroker              : Boolean;     // non standard
+    FPendingUnsubscribes : TStringList;
 
     procedure DoSend(Sender: TObject; anID: Word; aRetry: integer; aStream: TMemoryStream);
     procedure RxConnAck(Sender: TObject; aCode: byte);
@@ -211,14 +213,18 @@ type
     procedure LinkClosed(Sender: TObject; ErrCode: Word);
     procedure LinkData(Sender: TObject; ErrCode: Word);
     procedure TimerProc(var aMsg: TMessage);
+    procedure RemovePendingUnsubscribe(const ATopic: String);
+    procedure FinalizePendingUnsubscribe(anID: Word);
 
-    function  GetClientID   : UTF8String;
-    function  GetKeepAlive  : Word;
-    function  GetMaxRetries : integer;
-    function  GetRetryTime  : cardinal;
-    function  GetClean      : Boolean;
-    function  GetPassword   : UTF8String;
-    function  GetUsername   : UTF8String;
+    function  IsPendingUnsubscribe(const ATopic: String) : Boolean;
+
+    function  GetClientID                                : UTF8String;
+    function  GetKeepAlive                               : Word;
+    function  GetMaxRetries                              : integer;
+    function  GetRetryTime                               : cardinal;
+    function  GetClean                                   : Boolean;
+    function  GetPassword                                : UTF8String;
+    function  GetUsername                                : UTF8String;
 
     procedure SetClientID(const Value: UTF8String);
     procedure SetKeepAlive(const Value: Word);
@@ -682,6 +688,11 @@ begin
   else
     begin
       FEnable := false;
+      for i := 0 to Brokers.Count - 1 do
+        try
+          TMQTTClient (Brokers[i]).Activate (false);
+        except
+        end;
       for i := 0 to Server.ClientCount - 1 do
         try
           TClient (Server.Client[i]).Close;
@@ -1191,7 +1202,7 @@ begin
     begin
       Mon ('Client Disconnected.  Graceful ' + ny[TClient (Client).FGraceful]);
 
-      if (InFlight.Count > 0) or (Releasables.Count > 0) then
+      if (not Parser.Clean) and ((Subscriptions.Count > 0) or (InFlight.Count > 0) or (Releasables.Count > 0)) then
         begin
           if Assigned (FOnStoreSession) then FOnStoreSession (Client, Parser.ClientID) else Sessions.StoreSession (Parser.ClientID, TClient (Client));
         end;
@@ -1261,9 +1272,9 @@ end;
 
 procedure TMQTTServer.RxConnect (Sender: TObject; aProtocol: UTF8String; aVersion: byte; aClientID, aUserName, aPassword: UTF8String; aKeepAlive: Word; aClean: Boolean);
 var
-  aClient : TClient;
-  aServer : TWSocketServer;
-  Allowed : Boolean;
+  aClient, aExistingClient : TClient;
+  aServer                  : TWSocketServer;
+  Allowed                  : Boolean;
 begin
   Allowed := false;
   if not (Sender is TMQTTParser) then exit;
@@ -1284,13 +1295,16 @@ begin
           aClient.Parser.SendConnAck (rcIDENTIFIER);  // identifier rejected
           aClient.CloseDelayed;
         end
-      else if GetClient (aClientID) <> nil then
-        begin
-          aClient.Parser.SendConnAck (rcIDENTIFIER);  // identifier rejected
-          aClient.CloseDelayed;
-        end
       else
         begin
+          aExistingClient := GetClient (aClientID);
+          if (aExistingClient <> nil) and (aExistingClient <> aClient) then
+            begin
+              aExistingClient.FGraceful       := true;
+              aExistingClient.Parser.Clean    := true;
+              aExistingClient.Parser.ClientID := '';
+              aExistingClient.CloseDelayed;
+            end;
           //mon ('Client ID ' + ClientID + ' User '  + striUserName + ' Pass ' + PassWord);
           aClient.Parser.Username  := aUserName;
           aClient.Parser.Password  := aPassword;
@@ -1374,6 +1388,7 @@ begin
   FMessageID              := 0;
 
   Subscriptions           := TStringList.Create;
+  FPendingUnsubscribes    := TStringList.Create;
   Releasables             := TMQTTMessageStore.Create;
 
   Parser                  := TMQTTParser.Create;
@@ -1400,6 +1415,7 @@ destructor TMQTTClient.Destroy;
 begin
   Releasables.Clear;
   Releasables.Free;
+  FPendingUnsubscribes.Free;
   Subscriptions.Free;
   InFlight.Clear;
   InFlight.Free;
@@ -1437,6 +1453,8 @@ begin
         begin
           for i := 0 to Subscriptions.Count - 1 do
             begin
+              if IsPendingUnsubscribe(Subscriptions[i]) then Continue;
+
               anID := NextMessageID;
               x    := cardinal (Subscriptions.Objects[i]) and $03;
 
@@ -1606,6 +1624,7 @@ begin
   for i := 0 to Topics.Count - 1 do
     begin
       found := false;
+      RemovePendingUnsubscribe(Topics[i]);
       // 255 denotes acked
       if i > 254 then x := (cardinal (Topics.Objects[i]) and $03) else x := (cardinal (Topics.Objects[i]) and $03) + (anID shl 16) + (i shl 8);
 
@@ -1632,6 +1651,7 @@ begin
   if aTopic = '' then exit;
 
   found := false;
+  RemovePendingUnsubscribe(string(aTopic));
   anID  := NextMessageID;
   x     := ord (aQos) + (anID shl 16);
 
@@ -1803,9 +1823,39 @@ begin
     end;
 end;
 
+function TMQTTClient.IsPendingUnsubscribe(const ATopic: String): Boolean;
+begin
+  Result := FPendingUnsubscribes.IndexOf(ATopic) >= 0;
+end;
+
+procedure TMQTTClient.RemovePendingUnsubscribe(const ATopic: String);
+var
+  i : Integer;
+begin
+  for i := FPendingUnsubscribes.Count - 1 downto 0 do if FPendingUnsubscribes[i] = ATopic then FPendingUnsubscribes.Delete(i);
+end;
+
+procedure TMQTTClient.FinalizePendingUnsubscribe(anID: Word);
+var
+  i, idx : Integer;
+  LTopic : String;
+begin
+  for i := FPendingUnsubscribes.Count - 1 downto 0 do
+    if HiWord(Cardinal(FPendingUnsubscribes.Objects[i])) = anID then
+      begin
+        LTopic := FPendingUnsubscribes[i];
+        idx    := Subscriptions.IndexOf(LTopic);
+
+        if idx <> -1 then Subscriptions.Delete(idx);
+
+        FPendingUnsubscribes.Delete(i);
+      end;
+end;
+
 procedure TMQTTClient.RxUnsubAck (Sender: TObject; anID: Word);
 begin
   InFlight.DelPacket (anID);
+  FinalizePendingUnsubscribe(anID);
   Mon ('Message ' + IntToStr (anID) + ' disposed of.');
 end;
 
@@ -1835,6 +1885,7 @@ begin
       ClientID := aClientID;
 
       if Parser.Clean then begin
+        while FPendingUnsubscribes.Count > 0 do FinalizePendingUnsubscribe(HiWord(Cardinal(FPendingUnsubscribes.Objects[0])));
         InFlight.Clear;
         Releasables.Clear;
       end;
@@ -1987,20 +2038,27 @@ end;
 procedure TMQTTClient.Unsubscribe(Topics: TStringList);
 var
   LTopics : TStringList;
+  anID    : Word;
   i, idx  : Integer;
 begin
   if (Topics = nil) or (Topics.Count = 0) then Exit;
 
   LTopics := TStringList.Create;
   try
-    LTopics.Assign(Topics);
+    anID := NextMessageID;
 
-    for i := 0 to LTopics.Count - 1 do begin
-      idx := Subscriptions.IndexOf(LTopics[i]);
-      if idx <> -1 then Subscriptions.Delete(idx);
-    end;
+    for i := 0 to Topics.Count - 1 do
+      begin
+        idx := Subscriptions.IndexOf(Topics[i]);
+        if (idx <> -1) and (not IsPendingUnsubscribe(Topics[i])) then
+          begin
+            LTopics.Add(Topics[i]);
+            FPendingUnsubscribes.AddObject(Topics[i], TObject(anID shl 16));
+          end;
+      end;
 
-    Parser.SendUnsubscribe(NextMessageID, LTopics);
+    if LTopics.Count > 0 then
+      Parser.SendUnsubscribe(anID, LTopics);
   finally
     LTopics.Free;
   end;
@@ -2008,15 +2066,25 @@ end;
 
 procedure TMQTTClient.UnsubscribeAll;
 var
+  anID   : Word;
   LTopics: TStringList;
+  i      : Integer;
 begin
   if Subscriptions.Count = 0 then Exit;
 
   LTopics := TStringList.Create;
   try
-    LTopics.Assign(Subscriptions);
-    Subscriptions.Clear;
-    Parser.SendUnsubscribe(NextMessageID, LTopics);
+    anID := NextMessageID;
+
+    for i := 0 to Subscriptions.Count - 1 do
+      if not IsPendingUnsubscribe(Subscriptions[i]) then
+        begin
+          LTopics.Add(Subscriptions[i]);
+          FPendingUnsubscribes.AddObject(Subscriptions[i], TObject(anID shl 16));
+        end;
+
+    if LTopics.Count > 0 then
+      Parser.SendUnsubscribe(anID, LTopics);
   finally
     LTopics.Free;
   end;
@@ -2024,14 +2092,15 @@ end;
 
 procedure TMQTTClient.Unsubscribe(aTopic: UTF8String);
 var
-  idx: Integer;
+  anID: Word;
 begin
   if aTopic = '' then Exit;
+  if IsPendingUnsubscribe(string(aTopic)) then Exit;
+  if Subscriptions.IndexOf(string(aTopic)) = -1 then Exit;
 
-  idx := Subscriptions.IndexOf(string(aTopic));
-  if idx <> -1 then Subscriptions.Delete(idx);
-
-  Parser.SendUnsubscribe(NextMessageID, aTopic);
+  anID := NextMessageID;
+  FPendingUnsubscribes.AddObject(string(aTopic), TObject(anID shl 16));
+  Parser.SendUnsubscribe(anID, aTopic);
 end;
 
 procedure TMQTTClient.LinkClosed (Sender: TObject; ErrCode: Word);
@@ -2315,12 +2384,14 @@ constructor TMQTTSession.Create;
 begin
   ClientID    := '';
   Stamp       := Now;
+  Subscriptions := TStringList.Create;
   InFlight    := TMQTTPacketStore.Create;
   Releasables := TMQTTMessageStore.Create;
 end;
 
 destructor TMQTTSession.Destroy;
 begin
+  Subscriptions.Free;
   InFlight.Clear;
   InFlight.Free;
   Releasables.Clear;
@@ -2390,12 +2461,15 @@ var
 begin
   aClient.InFlight.Clear;
   aClient.Releasables.Clear;
+  aClient.Subscriptions.Clear;
 
   aSession := GetSession (ClientID);
   if aSession <> nil then
     begin
+      aClient.Subscriptions.Assign (aSession.Subscriptions);
       aClient.InFlight.Assign (aSession.InFlight);
       aClient.Releasables.Assign (aSession.Releasables);
+      if Assigned(aClient.OnSubscriptionChange) then aClient.OnSubscriptionChange(aClient);
     end;
 end;
 
@@ -2405,10 +2479,12 @@ var
 begin
   aClient.InFlight.Clear;
   aClient.Releasables.Clear;
+  aClient.Subscriptions.Clear;
 
   aSession := GetSession (ClientID);
   if aSession <> nil then
     begin
+      aClient.Subscriptions.Assign (aSession.Subscriptions);
       aClient.InFlight.Assign (aSession.InFlight);
       aClient.Releasables.Assign (aSession.Releasables);
     end;
@@ -2426,6 +2502,7 @@ begin
       List.Add (aSession);
     end;
 
+  aSession.Subscriptions.Assign (aClient.Subscriptions);
   aSession.InFlight.Assign (aClient.InFlight);
   aSession.Releasables.Assign (aClient.Releasables);
 end;
@@ -2441,6 +2518,7 @@ begin
       aSession.ClientID := ClientID;
       List.Add (aSession);
     end;
+  aSession.Subscriptions.Assign (aClient.Subscriptions);
   aSession.InFlight.Assign (aClient.InFlight);
   aSession.Releasables.Assign (aClient.Releasables);
 end;
