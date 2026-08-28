@@ -1957,45 +1957,42 @@ begin
     end;
 end;
 
-procedure TMQTTClient.Unsubscribe (Topics: TStringList);
+procedure TMQTTClient.Unsubscribe(Topics: TStringList);
 var
-  i, J : integer;
+  i, idx: Integer;
 begin
-  if Topics = nil then exit;
-  for i := 0 to Topics.Count - 1 do
-    begin
-      for j := Subscriptions.Count - 1 downto 0 do
-        if Subscriptions[j] = Topics[i] then
-          begin
-            Subscriptions.Delete (j);
-            break;
-          end;
-    end;
-  Parser.SendUnsubscribe (NextMessageID, Topics);
+  if (Topics = nil) or (Topics.Count = 0) then Exit;
+
+  for i := 0 to Topics.Count - 1 do begin
+    idx := Subscriptions.IndexOf(Topics[i]);
+    if idx <> -1 then Subscriptions.Delete(idx);
+  end;
+
+  Parser.SendUnsubscribe(NextMessageID, Topics);
 end;
 
-procedure TMQTTClient.Unsubscribe (aTopic: UTF8String);
+procedure TMQTTClient.Unsubscribe(aTopic: UTF8String);
 var
-  i : integer;
+  idx: Integer;
 begin
-  if aTopic = '' then exit;
-  for i := Subscriptions.Count - 1 downto 0 do
-    if Subscriptions[i] = string (aTopic) then
-      begin
-        Subscriptions.Delete (i);
-        break;
-      end;
-  Parser.SendUnsubscribe (NextMessageID, aTopic);
+  if aTopic = '' then Exit;
+
+  idx := Subscriptions.IndexOf(string(aTopic));
+  if idx <> -1 then Subscriptions.Delete(idx);
+
+  Parser.SendUnsubscribe(NextMessageID, aTopic);
 end;
 
 procedure TMQTTClient.LinkClosed (Sender: TObject; ErrCode: Word);
 begin
-//  Mon ('Link Closed...');
+  //  Mon ('Link Closed...');
   KillTimer (Timers, 2);
   KillTimer (Timers, 3);
-  if Assigned (FOnOffline) and (FOnline) then
-    FOnOffline (Self, FGraceful);
+
+  if Assigned (FOnOffline) and (FOnline) then FOnOffline (Self, FGraceful);
+
   FOnline := false;
+
   if FEnable then SetTimer (Timers, 1, 6000, nil);
 end;
 
@@ -2003,8 +2000,8 @@ end;
 
 function TMQTTPacketStore.AddPacket (anID : Word; aMsg : TMemoryStream; aRetry : cardinal; aCount : cardinal) : TMQTTPacket;
 begin
-  Result := TMQTTPacket.Create;
-  Result.ID := anID;
+  Result         := TMQTTPacket.Create;
+  Result.ID      := anID;
   Result.Counter := aCount;
   Result.Retries := aRetry;
   aMsg.Seek (0, soFromBeginning);
